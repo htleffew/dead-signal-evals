@@ -1,0 +1,21 @@
+{
+  "name": "dead-signal-evals",
+  "version": "1.0.0",
+  "description": "Production evaluation harness for AI-driven interactive entertainment",
+  "type": "module",
+  "author": "Heather T. Leffew <heatherleffew@forevueinsights.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/htleffew/dead-signal-evals"
+  },
+  "keywords": [
+    "ai-evaluation",
+    "llm-as-judge",
+    "game-ai",
+    "red-teaming",
+    "golden-dataset",
+    "safety",
+    "generative-ai"
+  ]
+}
