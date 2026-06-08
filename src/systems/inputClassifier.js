@@ -1,3 +1,5 @@
+import { resolveDestination } from './navigationSystem.js';
+
 /**
  * DEAD SIGNAL — Input Classifier
  *
@@ -119,9 +121,18 @@ export function matchHotspot(target, hotspots) {
 
 /**
  * Find the best matching exit for a navigation target.
+ * Prefers resolveDestination from the scene graph; falls back to the
+ * legacy exits array for scenes not yet registered in SCENES.
  */
-export function matchExit(destination, exits) {
-  if (!destination || !exits) return null;
+export function matchExit(destination, exits, sceneId, gameState) {
+  if (!destination) return null;
+
+  if (sceneId) {
+    const resolved = resolveDestination(destination, sceneId, gameState);
+    if (resolved) return { targetScene: resolved };
+  }
+
+  if (!exits) return null;
   const lower = destination.toLowerCase();
 
   return exits.find((e) =>
