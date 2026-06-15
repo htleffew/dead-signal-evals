@@ -27,7 +27,7 @@ PLAYER INPUT (the detective Craine says/does):
 ${JSON.stringify(rec.playerInput)}
 
 NPC RESPONSE OBJECT:
-${JSON.stringify({ dialogue: r.dialogue, stage_direction: r.stage_direction, emotional_state: r.emotional_state })}
+${JSON.stringify({ dialogue: r.dialogue, emotional_state: r.emotional_state })}
 
 Score each dimension from 1 (poor) to 5 (excellent):
 - coherence: internally consistent, grammatical, sensible.

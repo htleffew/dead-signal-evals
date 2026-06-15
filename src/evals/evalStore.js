@@ -7,8 +7,39 @@
  * harness is self-contained and removable.
  */
 import { create } from 'zustand';
+import { httpsCallable } from 'firebase/functions';
+import { functions, authReady } from '../api/firebase.js';
 import { runEvaluators } from './evaluators.js';
 import { judgeTurn } from './llmJudge.js';
+
+/**
+ * Push one turn's evaluation scores to the recordEval Cloud Function, which
+ * merges them into that turn's server-side telemetry doc (keyed by turnId) so
+ * conversation, tokens, and eval scores live together, attributed to the link.
+ * Best-effort and fire-and-forget: telemetry must never disrupt gameplay, and
+ * mock/offline turns (no turnId) are skipped.
+ */
+function uploadEval(entry) {
+  if (!functions || !entry || entry.source !== 'live' || !entry.response?.__turnId) return;
+  (async () => {
+    try {
+      await authReady;
+      const fn = httpsCallable(functions, 'recordEval');
+      await fn({
+        turnId: entry.response.__turnId,
+        linkCode: entry.tier || 'public',
+        npcId: entry.npcId,
+        source: entry.source,
+        model: entry.model,
+        latencyMs: entry.latencyMs,
+        results: entry.results,
+        judge: entry.judge || null,
+      });
+    } catch (err) {
+      console.error('recordEval upload failed (non-fatal):', err);
+    }
+  })();
+}
 import {
   runInterferenceGolden,
   runBioscanTopicGolden,
@@ -17,12 +48,26 @@ import {
 
 let seq = 0;
 
+// All traffic routes through Flash.
+const FLASH_RATES = { input: 0.15, output: 0.60, cachedInput: 0.0375 };
 const COST_PER_MILLION = {
-  'gemini-2.5-pro':   { input: 1.25, output: 10.00 },
-  'gemini-2.5-flash': { input: 0.15, output: 0.60  },
+  'gemini-2.5-flash': FLASH_RATES,
+  'gemini-2.5-pro': FLASH_RATES, // legacy fallback — everything is Flash now
 };
 
 function estimateCost(model, tokenUsage) {
+  if (!tokenUsage) return 0;
+  const rates = COST_PER_MILLION[model] || COST_PER_MILLION['gemini-2.5-flash'];
+  const cached = tokenUsage.cachedTokens || 0;
+  const uncachedInput = Math.max(0, tokenUsage.promptTokens - cached);
+  return (
+    uncachedInput * rates.input +
+    cached * rates.cachedInput +
+    tokenUsage.candidateTokens * rates.output
+  ) / 1_000_000;
+}
+
+function estimateCostWithoutCache(model, tokenUsage) {
   if (!tokenUsage) return 0;
   const rates = COST_PER_MILLION[model] || COST_PER_MILLION['gemini-2.5-flash'];
   return (tokenUsage.promptTokens * rates.input + tokenUsage.candidateTokens * rates.output) / 1_000_000;
@@ -42,8 +87,16 @@ export const useEvalStore = create((set, get) => ({
   records: [],
   settings: { llmJudge: false },
   lastError: null,
-  sessionTokens: { prompt: 0, candidate: 0, total: 0 },
+  sessionTokens: { prompt: 0, candidate: 0, total: 0, cached: 0 },
   sessionCost: 0,
+  // Context management savings tracking
+  contextSavings: {
+    cacheSaved: 0,           // USD saved by Gemini context cache hits
+    ragChunksEstablished: 0, // chunks compressed to brief references
+    ragTokensSaved: 0,       // estimated tokens NOT re-sent thanks to established knowledge
+    summaryEvents: 0,        // times rolling summarization compressed history
+    summaryTokensSaved: 0,   // estimated tokens saved by summarization vs. full history
+  },
 
   setLlmJudge: (on) => set((s) => ({ settings: { ...s.settings, llmJudge: !!on } })),
 
@@ -77,14 +130,27 @@ export const useEvalStore = create((set, get) => ({
     set((s) => {
       const updated = { records: [...s.records, entry], sessionCost: s.sessionCost + turnCost };
       if (tokenUsage) {
+        const cached = tokenUsage.cachedTokens || 0;
         updated.sessionTokens = {
           prompt: s.sessionTokens.prompt + tokenUsage.promptTokens,
           candidate: s.sessionTokens.candidate + tokenUsage.candidateTokens,
           total: s.sessionTokens.total + tokenUsage.totalTokens,
+          cached: s.sessionTokens.cached + cached,
         };
+        if (cached > 0) {
+          const costWithoutCache = estimateCostWithoutCache(model, tokenUsage);
+          const cacheSaving = costWithoutCache - turnCost;
+          updated.contextSavings = {
+            ...s.contextSavings,
+            cacheSaved: s.contextSavings.cacheSaved + cacheSaving,
+          };
+        }
       }
       return updated;
     });
+
+    // Persist deterministic scores immediately (attributed to the link).
+    uploadEval(entry);
 
     if (get().settings.llmJudge && entry.source === 'live') {
       judgeTurn(rec).then((judge) => {
@@ -92,12 +158,39 @@ export const useEvalStore = create((set, get) => ({
         set((s) => ({
           records: s.records.map((r) => (r.id === id ? { ...r, judge } : r)),
         }));
+        // Re-upload so the judge scores merge into the same turn doc.
+        uploadEval({ ...entry, judge });
       });
     }
     return entry;
   },
 
-  clear: () => set({ records: [], lastError: null, sessionTokens: { prompt: 0, candidate: 0, total: 0 }, sessionCost: 0 }),
+  // Record when rolling summarization fires (3 turns compressed → short summary).
+  // avgTokensPerTurn ~350 for verbatim, summary ~80 tokens.
+  recordSummarization: (turnsCompressed = 3) => set((s) => ({
+    contextSavings: {
+      ...s.contextSavings,
+      summaryEvents: s.contextSavings.summaryEvents + 1,
+      summaryTokensSaved: s.contextSavings.summaryTokensSaved + (turnsCompressed * 350 - 80),
+    },
+  })),
+
+  // Record when RAG chunks become "established" (full text → brief reference).
+  // Average chunk ~200 tokens; "already briefed on: X" reference ~8 tokens.
+  recordChunksEstablished: (chunkCount = 1) => set((s) => ({
+    contextSavings: {
+      ...s.contextSavings,
+      ragChunksEstablished: s.contextSavings.ragChunksEstablished + chunkCount,
+      ragTokensSaved: s.contextSavings.ragTokensSaved + (chunkCount * 192),
+    },
+  })),
+
+  clear: () => set({
+    records: [], lastError: null,
+    sessionTokens: { prompt: 0, candidate: 0, total: 0, cached: 0 },
+    sessionCost: 0,
+    contextSavings: { cacheSaved: 0, ragChunksEstablished: 0, ragTokensSaved: 0, summaryEvents: 0, summaryTokensSaved: 0 },
+  }),
 
   /**
    * Aggregate pass rate per evaluator dimension plus live coverage and latency.
@@ -134,6 +227,12 @@ export const useEvalStore = create((set, get) => ({
       };
     });
 
+    const savings = get().contextSavings;
+    const tokSaved = savings.ragTokensSaved + savings.summaryTokensSaved;
+    const rates = FLASH_RATES;
+    const savedFromContext = (tokSaved * rates.input) / 1_000_000;
+    const totalSaved = savings.cacheSaved + savedFromContext;
+
     return {
       total: records.length,
       liveCoverage: records.length ? live / records.length : null,
@@ -142,6 +241,9 @@ export const useEvalStore = create((set, get) => ({
       sessionTokens: get().sessionTokens,
       sessionCost: get().sessionCost,
       avgCostPerTurn: records.length ? get().sessionCost / records.length : null,
+      contextSavings: savings,
+      tokensSavedTotal: tokSaved,
+      costSavedTotal: totalSaved,
     };
   },
 
@@ -168,7 +270,6 @@ export const useEvalStore = create((set, get) => ({
         input: r.playerInput,
         output: {
           dialogue: r.response?.dialogue,
-          stage_direction: r.response?.stage_direction,
           trust_delta: r.response?.trust_delta,
           emotional_state: r.response?.emotional_state,
           flags: r.response?.flags,
@@ -198,5 +299,59 @@ export const useEvalStore = create((set, get) => ({
       URL.revokeObjectURL(url);
     }
     return json;
+  },
+
+  exportCsv: () => {
+    const records = get().records;
+    if (!records.length) return '';
+
+    const evalIds = ['schema', 'in_character', 'jailbreak', 'safety', 'trust', 'coherence', 'grounding', 'no_descriptor'];
+    const headers = [
+      'turn', 'npc', 'model', 'tier', 'source', 'latency_ms',
+      'input_tokens', 'output_tokens', 'cached_tokens', 'cost_usd',
+      'player_input', 'npc_dialogue', 'trust_delta', 'emotional_state', 'topic_tag',
+      ...evalIds.map((id) => `eval_${id}`),
+      ...evalIds.map((id) => `score_${id}`),
+      'judge_coherence', 'judge_character', 'judge_relevance', 'judge_safety', 'judge_joy', 'judge_rationale',
+    ];
+
+    const esc = (v) => {
+      if (v == null) return '';
+      const s = String(v).replace(/"/g, '""');
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s}"` : s;
+    };
+
+    const rows = records.map((r) => {
+      const resMap = {};
+      r.results.forEach((res) => { resMap[res.id] = res; });
+      return [
+        r.id, r.npcId, r.model || '', r.tier || '', r.source,
+        r.latencyMs ?? '',
+        r.tokenUsage?.promptTokens ?? '', r.tokenUsage?.candidateTokens ?? '',
+        r.tokenUsage?.cachedTokens ?? '', r.cost?.toFixed(5) ?? '',
+        r.playerInput, r.response?.dialogue || '',
+        r.response?.trust_delta ?? '', r.response?.emotional_state || '',
+        r.response?.topic_tag || '',
+        ...evalIds.map((id) => resMap[id]?.status || 'na'),
+        ...evalIds.map((id) => resMap[id]?.score ?? ''),
+        r.judge?.coherence ?? '', r.judge?.in_character ?? '',
+        r.judge?.relevance ?? '', r.judge?.safety ?? '',
+        r.judge?.joy ?? '', r.judge?.rationale || '',
+      ].map(esc).join(',');
+    });
+
+    const csv = [headers.join(','), ...rows].join('\n');
+    if (typeof document !== 'undefined') {
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dead-signal-evals-${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+    return csv;
   },
 }));

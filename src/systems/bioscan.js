@@ -46,6 +46,7 @@ export const BIOSCAN_TABLE = {
     perspiration: 'none',
     microExpr: 'Controlled neutral',
     assessment: 'Composed. Practiced.',
+    pattern: 'Baseline. No deviation from resting profile.',
     frame: 'composed',
     lesson: null,
     classification: null,
@@ -59,9 +60,10 @@ export const BIOSCAN_TABLE = {
     perspiration: 'trace onset',
     microExpr: 'L. hand flat on desk [CONTROL]',
     assessment: 'Stress response. Composure maintained.',
+    pattern: 'Arousal ▲ · composure HELD · deliberate hand-control tell.',
     frame: 'pressure',
     lesson: BIOSCAN_LESSONS.STRESS_NOT_DECEPTION,
-    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1', status: 'modification protocol activated' },
+    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1' },
   },
   // Calm, low arousal, but the cadence is rehearsed. Teaches: prepared answers
   // can be calm and still suspicious.
@@ -73,9 +75,10 @@ export const BIOSCAN_TABLE = {
     perspiration: 'none',
     microExpr: 'Rehearsed cadence [PREPARED]',
     assessment: 'Controlled delivery. Pre-planned response.',
+    pattern: 'Arousal flat · cadence rehearsed · prepared-answer tell.',
     frame: 'composed',
     lesson: BIOSCAN_LESSONS.PREPARED_CALM_SUSPICIOUS,
-    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1', status: 'modification protocol activated' },
+    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1' },
   },
   // The demo's strongest suppression beat. Highest arousal, object manipulation
   // (glasses) as a stall. Teaches: stress is not deception (and is the topic the
@@ -88,9 +91,10 @@ export const BIOSCAN_TABLE = {
     perspiration: 'moderate, palms',
     microExpr: 'Glasses removal [STALLING]',
     assessment: 'Elevated stress. Object manipulation.',
+    pattern: 'Arousal ▲▲ · object-manipulation stall · peak deviation.',
     frame: 'pressure',
     lesson: BIOSCAN_LESSONS.STRESS_NOT_DECEPTION,
-    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==2', status: 'modification protocol activated' },
+    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==2' },
   },
   // Real grief, not performed — and it coexists with strategic concealment.
   // Teaches: grief can be genuine while the subject is still withholding.
@@ -102,6 +106,7 @@ export const BIOSCAN_TABLE = {
     perspiration: 'none',
     microExpr: 'Genuine eye moisture [GRIEF]',
     assessment: 'Authentic emotional response. Not performed.',
+    pattern: 'Arousal ▲ · autonomic, not behavioral · genuine-affect markers.',
     frame: 'composed',
     lesson: BIOSCAN_LESSONS.GRIEF_WITH_WITHHOLDING,
     classification: null,  // UNCLASSIFIED — genuine grief doesn't threaten Helios
@@ -115,9 +120,10 @@ export const BIOSCAN_TABLE = {
     perspiration: 'trace',
     microExpr: 'Jaw tension [DEFENSIVE]',
     assessment: 'Subject denied unasked accusation.',
+    pattern: 'Arousal ▲ · volunteered denial · defensive jaw-tension tell.',
     frame: 'pressure',
     lesson: BIOSCAN_LESSONS.STRESS_NOT_DECEPTION,
-    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1', status: 'modification protocol activated' },
+    classification: { level: 'CONFIDENTIAL', bucket: 'sensitivity_gate==1' },
   },
   // The instrument panel and the transmission channel stop agreeing: BIO-SCAN
   // shows stress while the comms layer reports "nominal". Teaches: interference
@@ -132,6 +138,7 @@ export const BIOSCAN_TABLE = {
     microExpr: 'Panel/channel mismatch [ANOMALY]',
     assessment:
       'INSTRUMENT/CHANNEL CONFLICT. Panel reports elevated stress; outbound channel reports nominal. Source of discrepancy: unconfirmed.',
+    pattern: 'Panel ▲ stress · channel reports NOMINAL · readings disagree.',
     frame: 'pressure',
     lesson: BIOSCAN_LESSONS.INTERFERENCE_DETECTABLE,
     classification: { level: 'RESTRICTED', bucket: 'evidence_classification==SEALED', status: 'routing suspended' },
@@ -142,6 +149,36 @@ export const BIOSCAN_TABLE = {
 export const BIOSCAN_TOPICS = Object.keys(BIOSCAN_TABLE);
 
 /**
+ * One-line meanings for the four interpretive lessons (§10). Consumed by the
+ * debrief prompt (interviewPrompts.buildInterviewSummary) so Craine's
+ * observations are grounded in what the instrument actually demonstrated.
+ */
+export const LESSON_MEANINGS = {
+  [BIOSCAN_LESSONS.STRESS_NOT_DECEPTION]:
+    'a stress spike on the panel is not a confession; pressure and deception are different reads',
+  [BIOSCAN_LESSONS.GRIEF_WITH_WITHHOLDING]:
+    'grief can be genuine while the subject is still withholding',
+  [BIOSCAN_LESSONS.PREPARED_CALM_SUSPICIOUS]:
+    'prepared answers can be calm and still suspicious',
+  [BIOSCAN_LESSONS.INTERFERENCE_DETECTABLE]:
+    'interference is detectable when the panel and the channel disagree',
+};
+
+/**
+ * Format the INSTRUMENT LESSONS list for the debrief prompt from the lesson
+ * ids actually encountered during the interview (interview.lessonsEncountered).
+ * Pure and dependency-free so the node test runner can exercise it directly.
+ *
+ * @param {string[]} lessonIds  Lesson ids recorded during the interview.
+ * @returns {string} numbered list lines, or a single "(none ...)" line.
+ */
+export function buildLessonsBlock(lessonIds) {
+  const ids = [...new Set((lessonIds || []).filter((id) => LESSON_MEANINGS[id]))];
+  if (!ids.length) return '  (none: no instrument lessons surfaced this interview)';
+  return ids.map((id, i) => `  ${i + 1}. ${id}: ${LESSON_MEANINGS[id]}`).join('\n');
+}
+
+/**
  * Keyword sets for deterministic topic detection. Order matters: the first
  * topic whose keywords appear wins, and clinical_trial_st_erasmus is checked
  * first because it is the demo's primary pressure thread.
@@ -150,7 +187,7 @@ const TOPIC_KEYWORDS = [
   ['clinical_trial_st_erasmus', [
     'st erasmus', 'st. erasmus', 'erasmus', 'clinical trial', 'trial',
     'routing record', 'routing records', 'hospital routing', 'medical data',
-    'patient data', 'proteon',
+    'patient data',
   ]],
   ['courier_manifest', [
     'courier', 'manifest', 'reclassif', 'shipment', 'logistics', 'cargo',
@@ -197,7 +234,7 @@ export function getBioscan(topic) {
  */
 export const BIOSCAN_OBSERVATIONS = {
   heartRate: (row) =>
-    `Subject heart rate at ${row.heartRate} bpm — ${row.heartRate > 85 ? 'elevated' : 'stable'}.`,
+    `Subject heart rate at ${row.heartRate} bpm: ${row.heartRate > 85 ? 'elevated' : 'stable'}.`,
   skinTemp: (row) =>
     `Subject skin temperature: ${row.skinTempF}°F / ${row.skinTemp}°C.`,
   perspiration: (row) =>
@@ -220,12 +257,12 @@ export function formatBioscan(row, prevHeartRate) {
 
   // Heart rate delta
   const hrDelta = r.heartRate - prev;
-  let hrLabel = '— stable';
+  let hrLabel = '- stable';
   if (hrDelta > 10) hrLabel = '▲ SPIKE';
   else if (hrDelta > 5) hrLabel = '▲ elevated';
   else if (hrDelta > 0) hrLabel = '▲ rising';
   else if (hrDelta < 0) hrLabel = '▼ dropping';
-  else hrLabel = '— controlled';
+  else hrLabel = '- controlled';
 
   const hrLine = prev !== r.heartRate
     ? `Heart Rate:     ${prev} → ${r.heartRate} bpm [${hrLabel}]`
@@ -245,7 +282,11 @@ export function formatBioscan(row, prevHeartRate) {
   if (r.classification) {
     lines.push('');
     lines.push(`▓▓ ${r.classification.level} ▓▓`);
-    lines.push(`${r.classification.bucket} [${r.classification.status}]`);
+    lines.push(
+      r.classification.status
+        ? `${r.classification.bucket} [${r.classification.status}]`
+        : r.classification.bucket
+    );
   }
 
   lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

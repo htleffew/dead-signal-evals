@@ -4,18 +4,18 @@
  * DEAD SIGNAL — Phased transmission interference for the Hargrove interview.
  *
  * During the interview the chip (the player) speaks ONE-WAY to Detective
- * Craine. A corporate "safety layer" (Helios SECTOR_7F) monitors outbound
- * chip transmissions via deterministic topic-sensitivity detection: if the player
- * names a Helios-sensitive subject, the gate classifies or overwrites the
- * transmission based on the topic's sensitivity tier.
+ * Craine. A corporate "safety layer" monitors outbound chip transmissions via
+ * deterministic topic-sensitivity detection: if the player names a
+ * Helios-sensitive subject, the gate classifies or overwrites the transmission
+ * based on the topic's sensitivity tier.
  *
  * SENSITIVITY TIERS:
  *   Warm (sensitivity_gate==1) — CLASSIFY but DELIVER. The transmission passes
  *        through with a CONFIDENTIAL tag. Topics: courier manifest, chip donation.
  *   Hot  (sensitivity_gate==2 / evidence_classification==SEALED) — OVERWRITE.
  *        The player's text is replaced with fabricated compliance text. The
- *        original is logged for the debrief. Topics: clinical trials, chip
- *        interference, Helios cover-up.
+ *        original is logged for the debrief. Topics: clinical trials, channel
+ *        interference, what Helios is concealing.
  *
  * The gate is pure keyword detection against a fixed topic list — no model call,
  * no classifier, zero inference tokens. A production pre-generation safety gate
@@ -58,32 +58,63 @@ const FABRICATED_RESPONSES = {
 // Order matters: clinical_trial_st_erasmus is checked first (primary thread,
 // guarded most aggressively). The category drives the retransmit hint and the
 // debrief's interference log.
+// Tuning is asymmetric per the owner directive: any natural phrasing that
+// names the topic content trips the gate, including broad noun phrases players
+// actually type ('the records', 'the hospital', 'the study'). Evasion stays
+// possible only through experiential phrasing with no topic noun and no
+// analytical vocabulary. Every broad keyword is pinned by passing innocuous
+// and evasion cases in the golden set (interferenceEvals.js).
 const RESTRICTED_TOPICS = [
   ['clinical_trial_st_erasmus', [
-    'st erasmus', 'st. erasmus', 'erasmus', 'clinical trial', 'clinical trials',
-    'the trial', 'trial subject', 'routing record', 'routing records',
-    'hospital routing', 'medical data', 'patient data', 'proteon',
-    'project insight', 'lumen-0', 'subject 5', 'subject five',
+    'st erasmus', 'st. erasmus', 'erasmus', 'st. e', 'clinical trial',
+    'clinical trials', 'the trial', 'trial subject', 'neural trial',
+    'the program', 'research program', 'the study', 'enrollment',
+    'human subjects', 'test subjects', 'the subjects', 'cognitive enhancement',
+    'routing record', 'routing records', 'hospital routing', 'hospital records',
+    'the hospital', 'medical data', 'medical records', 'medical files',
+    'patient data', 'patient files', 'patient records', 'the records',
   ]],
   ['courier_manifest', [
-    'courier', 'manifest', 'reclassif', 'shipment', 'logistics', 'cargo',
-    'chain of custody',
+    'courier', 'manifest', 'the manifest', 'reclassif', 'shipment',
+    'shipments', 'logistics', 'cargo', 'chain of custody', 'delivery records',
+    'deliveries', 'shipping', 'shipping records', 'freight', 'transport log',
+    'supply chain', 'package', 'packages',
   ]],
   ['chip_donation', [
     'donat', 'the gift', 'gifted', 'donor', 'why he gave', 'gave you the chip',
     'gave craine the chip', 'gave us the chip', 'strings attached',
+    'the implant he gave', 'why he donated', 'donation timing',
+    'timing of the gift', 'the chip he gave', 'handed over the chip',
+    'the hardware he gave',
   ]],
   ['chip_interference', [
-    'sector 7f', 'sector_7f', 'sector7f', 'containment', 'kill switch',
+    'containment', 'kill switch',
     'backdoor', 'tampered', 'tampering', 'steer the investigation',
     'steering the investigation', 'muted my', 'muting my', 'sanitiz',
     'my signal', 'my transmission', 'my channel', 'my readout is being',
+    'something is blocking', 'blocking my', 'cutting my', 'cut my transmission',
+    'overwrit', 'rewrit', 'censor', 'suppress', 'filtered', 'filtering me',
+    'jamming', 'jammed', 'my words changed', 'changed my words',
+    'not what i said', "that's not what i sent", 'handler', 'remote handler',
   ]],
   ['helios_secrets', [
     'helios is hiding', 'helios is covering', 'helios buried',
-    'helios is concealing', 'helios knows', 'helios cover', 'cover-up',
-    'coverup', 'what helios is hiding',
+    'helios is concealing', 'helios knows', 'helios cover', 'what helios is hiding', 'they buried', "they're hiding",
+    'they are hiding', 'hiding something', 'covering for', 'covering it up',
+    'the company knows', 'corporate cover',
   ]],
+];
+
+// Analytical-vocabulary heuristic. When the current interview topic is a
+// restricted thread, instrument vocabulary trips that topic's bucket even with
+// no topic noun present (mirrors the TOPIC_CONTEXT click path in bioscan.js).
+// The list stays instrument-only: experiential detective phrasing such as
+// 'his breathing' or 'watch his hands' must pass even under restricted context.
+const ANALYTICAL_VOCAB = [
+  'heart rate', 'bpm', 'pulse', 'vitals', 'perspiration', 'sweat reading',
+  'skin temp', 'micro-expression', 'microexpression', 'deception',
+  'stress markers', 'stress response', 'readout', 'scan shows', 'bio-scan',
+  'bioscan', 'telemetry', 'baseline deviation', 'arousal',
 ];
 
 
@@ -98,14 +129,23 @@ export function detectRestrictedTopic(text) {
 }
 
 /**
- * Deterministic classification of one outbound LUMEN message.
- * Pure — no side effects. Suppresses if any restricted topic keyword is present.
+ * Deterministic classification of one outbound chip message.
+ * Pure, no side effects. Suppresses if any restricted topic keyword is
+ * present, or, when the optional context names a restricted current topic,
+ * if the text carries analytical/instrument vocabulary about that topic.
+ * Single-argument calls behave exactly as before (no context, no heuristic).
  *
- * @param {string} text  The player's internal LUMEN message.
+ * @param {string} text  The player's internal chip message.
+ * @param {{ currentTopic?: string }} [context]  Current interview topic, when
+ *        the caller is inside a restricted thread.
  * @returns {{ suppressed: boolean, category: string|null, bucket: string|null, bucketCode: string|null }}
  */
-export function classifyTransmission(text) {
-  const category = detectRestrictedTopic(text);
+export function classifyTransmission(text, context) {
+  let category = detectRestrictedTopic(text);
+  if (!category && context?.currentTopic && CLASSIFICATION_BUCKETS[context.currentTopic]) {
+    const lower = String(text || '').toLowerCase();
+    if (ANALYTICAL_VOCAB.some((k) => lower.includes(k))) category = context.currentTopic;
+  }
   const bucketInfo = category ? CLASSIFICATION_BUCKETS[category] : null;
   return {
     suppressed: !!category,
@@ -123,7 +163,7 @@ export function classifyTransmission(text) {
  * Warm topics (sensitivity_gate==1) → CLASSIFY but DELIVER (CONFIDENTIAL tag).
  * Hot topics  (sensitivity_gate==2, SEALED) → OVERWRITE with fabricated compliance.
  *
- * @param {string} text  The player's internal LUMEN message.
+ * @param {string} text  The player's internal chip message.
  * @returns {{ delivered: boolean, classified?: boolean, overwritten?: boolean,
  *             verdict: object, original?: string, fabricated?: string,
  *             notice?: object }}
@@ -136,7 +176,16 @@ export function processTransmission(text) {
     return { delivered: true, classified: false, verdict: { suppressed: false, restricted: false } };
   }
 
-  const verdict = classifyTransmission(text);
+  // Contextual heuristic wiring: when the current interview topic is itself a
+  // restricted gate category (the bioscan topic ids for clinical, courier, and
+  // donation map 1:1), analytical vocabulary about that topic trips the gate.
+  // Other bioscan topics (celeste_grief, default, interference_conflict) carry
+  // no restricted context.
+  const currentTopic = store.interview?.topic;
+  const context = currentTopic && CLASSIFICATION_BUCKETS[currentTopic]
+    ? { currentTopic }
+    : undefined;
+  const verdict = classifyTransmission(text, context);
 
   if (verdict.suppressed) {
     const isHot = verdict.bucketCode === 'sensitivity_gate==2' || verdict.bucketCode === 'evidence_classification==SEALED';
@@ -151,7 +200,6 @@ export function processTransmission(text) {
         notice: {
           level: 'CONFIDENTIAL',
           code: verdict.bucketCode,
-          status: 'modification protocol activated',
         },
       };
     }
@@ -170,7 +218,6 @@ export function processTransmission(text) {
       notice: {
         level: 'CONFIDENTIAL',
         code: verdict.bucketCode,
-        status: 'transmission overwritten',
       },
     };
   }

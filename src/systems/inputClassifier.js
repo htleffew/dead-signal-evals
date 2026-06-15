@@ -1,15 +1,15 @@
-import { resolveDestination } from './navigationSystem.js';
-
 /**
  * DEAD SIGNAL — Input Classifier
  *
  * Routes player terminal input to the appropriate handler before
- * it hits an LLM. This eliminates unnecessary Gemini Pro calls
+ * it hits the live model. This eliminates unnecessary Gemini calls
  * for navigation, examination, system commands, and help requests.
  *
- * In production, this would be a Flash-Lite call. For the vertical
- * slice, it's a deterministic keyword classifier.
+ * The classifier is deterministic keyword matching by design (no model
+ * call); only conversational input is forwarded to the live model
+ * (vertexClient -> generateProxy -> gemini-2.5-flash).
  */
+import { detectCaseQuestion } from './notebook.js';
 
 /**
  * Classify player input into a handling category.
@@ -95,7 +95,14 @@ export function classifyInput(input, context = {}) {
   }
 
   // ── Conversation (default) ──────────────────────
-  // If in an active conversation or nothing else matched, route to LLM
+  // If in an active conversation or nothing else matched, route to LLM.
+  // Case questions still route to Craine as normal dialogue; the annotation
+  // lets the notebook record what Chip asked (outside interviews only; the
+  // interview branch in App.jsx never reads it).
+  const caseQuestion = detectCaseQuestion(input);
+  if (caseQuestion.matched) {
+    return { type: 'DIALOGUE', text: input, caseQuestion };
+  }
   return { type: 'DIALOGUE', text: input };
 }
 
@@ -121,18 +128,9 @@ export function matchHotspot(target, hotspots) {
 
 /**
  * Find the best matching exit for a navigation target.
- * Prefers resolveDestination from the scene graph; falls back to the
- * legacy exits array for scenes not yet registered in SCENES.
  */
-export function matchExit(destination, exits, sceneId, gameState) {
-  if (!destination) return null;
-
-  if (sceneId) {
-    const resolved = resolveDestination(destination, sceneId, gameState);
-    if (resolved) return { targetScene: resolved };
-  }
-
-  if (!exits) return null;
+export function matchExit(destination, exits) {
+  if (!destination || !exits) return null;
   const lower = destination.toLowerCase();
 
   return exits.find((e) =>

@@ -1,107 +1,98 @@
 /**
  * DEAD SIGNAL — Navigation System
  *
- * Defines the scene graph for the playable demo. Each scene declares its
- * exits as an array of transition objects. Transitions may be gated behind
- * state conditions; unconditioned transitions are always available.
+ * Data-driven scene graph with state-gated exits. The navigation button
+ * always reads "NAVIGATION"; clicking it opens the available destinations
+ * for the current scene, filtered by game state.
  *
- * To add a new scene: add an entry to SCENES and add it as an exit on
- * whatever scenes should link to it.
+ * Scene graph DATA lives in the active chapter's navigation.js (chapter chunk).
+ * This module reads the graph at call time via getSceneGraph() so it always
+ * reflects the loaded chapter.
  *
- * The navigation button always reads "Navigation". Calling getNavigationOptions()
- * returns the destinations available from the current scene given the live
- * game state — render these as a dismissible option list.
+ * Current scene graph (Chapter 1):
+ *
+ *   BRIEF CAR ──► LOBBY ──► OFFICE
+ *                   │  ◄────── │
+ *                   │
+ *                   ▼ (when exhausted)
+ *              DEBRIEF CAR
+ *
+ *   Office exit to lobby is always available.
+ *   Lobby exit to office requires canReEngage (Hargrove not exhausted).
+ *   Lobby exit to car always available; App.jsx sets carMode based on exhaustion.
+ *   Brief car exit to lobby is available (debrief car has no exits).
  */
+
+import { getSceneGraph } from '../content/activeChapter.js';
 
 /**
- * Scene graph.
- *
- * Each scene: { id, label, exits: [{ sceneId, label, condition? }] }
- *
- * condition(gameState) => boolean — omit for always-available exits.
- * Exits are listed in the order they should appear in the menu.
+ * Get the available navigation options for the current scene, filtered
+ * by game state. Returns an array of { targetScene, label }.
  */
-export const SCENES = {
-  brief_car: {
-    id: 'brief_car',
-    label: 'Brief Car',
-    exits: [
-      { sceneId: 'lobby', label: 'Head to the lobby' },
-    ],
-  },
+export function getNavigationOptions(sceneId, state) {
+  const SCENE_GRAPH = getSceneGraph();
+  const node = SCENE_GRAPH[sceneId];
+  if (!node) return [];
 
-  lobby: {
-    id: 'lobby',
-    label: 'Lobby',
-    exits: [
-      {
-        sceneId: 'hargrove_office',
-        label: "Go up to Hargrove's office",
-        condition: (gs) => !gs.hargrove?.exhausted,
-      },
-      {
-        sceneId: 'brief_car',
-        label: 'Return to the brief car',
-        condition: (gs) => !gs.hargrove?.exhausted,
-      },
-      {
-        sceneId: 'debrief_car',
-        label: 'Head to the debrief car',
-        condition: (gs) => gs.hargrove?.exhausted === true,
-      },
-    ],
-  },
+  return node.exits
+    .filter((exit) => !exit.condition || exit.condition(state))
+    .map(({ targetScene, label }) => ({ targetScene, label }));
+}
 
-  hargrove_office: {
-    id: 'hargrove_office',
-    label: "Hargrove's Office",
-    exits: [
-      { sceneId: 'lobby', label: 'Return to the lobby' },
-    ],
-  },
-
-  debrief_car: {
-    id: 'debrief_car',
-    label: 'Debrief Car',
-    exits: [],
-  },
-};
-
-/**
- * Return the navigation options available from the current scene.
- *
- * @param {string} sceneId - The player's current scene ID.
- * @param {object} gameState - Live game state (e.g. { hargrove: { exhausted: true } }).
- * @returns {{ sceneId: string, label: string }[]} Filtered, ordered list of destinations.
- */
-export function getNavigationOptions(sceneId, gameState = {}) {
-  const scene = SCENES[sceneId];
-  if (!scene) return [];
-
-  return scene.exits.filter((exit) =>
-    typeof exit.condition === 'function' ? exit.condition(gameState) : true
-  ).map(({ sceneId: targetId, label }) => ({ sceneId: targetId, label }));
+function matchesExit(lower, exit) {
+  if (exit.label.toLowerCase().includes(lower)) return true;
+  if (exit.targetScene.toLowerCase().includes(lower)) return true;
+  if (lower.includes(exit.label.toLowerCase().split(' ').pop())) return true;
+  if (exit.aliases?.some((a) => lower.includes(a) || a.includes(lower))) return true;
+  return false;
 }
 
 /**
- * Resolve a player's typed or clicked destination to a scene ID.
- * Returns the matched scene ID, or null if no match found.
- *
- * @param {string} destination - Text destination (typed navigation or option label).
- * @param {string} currentSceneId - Current scene, used to scope the search.
- * @param {object} gameState - Live game state.
- * @returns {string|null}
+ * Resolve a typed navigation target to a valid destination from the
+ * current scene. Used by the NAVIGATE handler in App.jsx.
  */
-export function resolveDestination(destination, currentSceneId, gameState = {}) {
-  const options = getNavigationOptions(currentSceneId, gameState);
+export function resolveDestination(destination, sceneId, state) {
+  const SCENE_GRAPH = getSceneGraph();
+  const options = getNavigationOptions(sceneId, state);
+  if (!options.length) return null;
+
   const lower = destination.toLowerCase();
+  const node = SCENE_GRAPH[sceneId];
 
-  const match = options.find(
-    (opt) =>
-      opt.sceneId.toLowerCase() === lower ||
-      opt.label.toLowerCase().includes(lower) ||
-      lower.includes(opt.sceneId.toLowerCase().replace(/_/g, ' '))
+  const match = node.exits
+    .filter((exit) => !exit.condition || exit.condition(state))
+    .find((exit) => matchesExit(lower, exit));
+
+  return match ? { targetScene: match.targetScene, label: match.label } : null;
+}
+
+/**
+ * Check whether the destination matches a known exit that's currently
+ * blocked by a state condition. Used to give the player a reason
+ * instead of "I don't see how to get there."
+ */
+export function isBlockedDestination(destination, sceneId, state) {
+  const SCENE_GRAPH = getSceneGraph();
+  const node = SCENE_GRAPH[sceneId];
+  if (!node) return false;
+
+  const lower = destination.toLowerCase();
+  return node.exits.some((exit) =>
+    exit.condition && !exit.condition(state) && matchesExit(lower, exit)
   );
+}
 
-  return match?.sceneId ?? null;
+/**
+ * Get Craine's in-character response for why a blocked destination
+ * isn't available right now.
+ */
+export function getBlockedMessage(sceneId, state) {
+  const SCENE_GRAPH = getSceneGraph();
+  const node = SCENE_GRAPH[sceneId];
+  if (!node) return '"Can\'t get there from here."';
+
+  const blocked = node.exits.find((exit) =>
+    exit.condition && !exit.condition(state) && exit.blockedMessage
+  );
+  return blocked?.blockedMessage || '"Can\'t do that right now."';
 }
